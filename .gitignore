@@ -1,0 +1,5 @@
+/target/
+logchain-data/
+demo/data/
+demo/sample.log
+demo/snapshot.json
