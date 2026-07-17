@@ -159,7 +159,7 @@ cargo test
 
 This project connects two threads running through the broader portfolio:
 
-**Harvest Horizon (P32)** explored post-quantum cryptographic migration — the "harvest now, decrypt later" threat. logchain addresses a different but related problem: *retroactive log falsification*. Both are about cryptographic commitments: Harvest Horizon asks "are today's encryption choices secure against tomorrow's adversary?", logchain asks "can yesterday's log entries be trusted today?". Both come down to the same principle: a cryptographic commitment made at the right time and archived to an out-of-band location is unforgeable.
+**Harvest Horizon** explored post-quantum cryptographic migration — the "harvest now, decrypt later" threat. logchain addresses a different but related problem: *retroactive log falsification*. Both are about cryptographic commitments: Harvest Horizon asks "are today's encryption choices secure against tomorrow's adversary?", logchain asks "can yesterday's log entries be trusted today?". Both come down to the same principle: a cryptographic commitment made at the right time and archived to an out-of-band location is unforgeable.
 
 **Audit-trail/governance thread:** Every compliance-oriented project in the portfolio (SEAD 3, ATO Accelerator, CFIUS Screener) relies on audit logs as the ground truth for regulatory review. logchain is the cryptographic infrastructure that makes those audit logs trustworthy. A CFIUS filing or ATO package that references a logchain-verified audit trail can prove to a reviewer that the logs haven't been touched since the system was approved.
 
@@ -183,6 +183,6 @@ demo/
   tamper_demo.ps1   — orchestrates the full demo sequence
 ```
 
-**Crate pattern:** `[lib]` + `[[bin]]` — the library is importable in integration tests without going through the binary. Same pattern as P56 (pcap-anomaly) and P57 (bin-intel).
+**Crate pattern:** `[lib]` + `[[bin]]` — the library is importable in integration tests without going through the binary. Same pattern as pcap-anomaly and bin-intel.
 
 **No unsafe code. No hand-rolled cryptography.** SHA-256 comes from the `sha2` crate (RustCrypto project). The Merkle tree structure is hand-implemented — it's simple enough to fit in one file and important enough to understand every line.
