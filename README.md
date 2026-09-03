@@ -2,7 +2,7 @@
 
 Tamper-evident audit trail for log files. Each log entry is SHA-256 hashed on ingestion and incorporated into a Merkle tree — any retroactive modification to any historical entry is cryptographically detectable, without a blockchain or external service.
 
-**47 tests · Rust · CLI · No external dependencies at runtime**
+**48 tests · Rust · CLI · No external dependencies at runtime**
 
 ---
 
@@ -58,13 +58,26 @@ logchain [--data-dir PATH] <COMMAND>
 Commands:
   tail <file> [--interval-ms N] [--once]   Ingest a log file (live or batch)
   verify                                    Check integrity against stored root
-  export                                    Print signed JSON snapshot to stdout
+  export                                    Print committed JSON snapshot to stdout
   status                                    Show entry count and current root
 ```
 
 **`tail`** — reads a log file and appends any new lines to the journal. With `--once`, reads the whole file and exits. Without `--once`, polls for new lines every `--interval-ms` milliseconds (default 500).
 
 **`verify`** — runs the full two-level check. Exits 0 if clean, 2 if tampered.
+
+**What verification does and does not localise.** Detection is guaranteed; attribution is
+deliberately limited, and the tool does not guess beyond what the data supports.
+
+| finding | what it pins down | what it cannot say |
+|---|---|---|
+| `EntryHashMismatch` | the exact `seq` whose `raw` and `hash` disagree | **which of the two was edited.** `SHA-256(raw) != hash` is symmetric — editing the text and editing the stored hash produce an identical signature, and nothing in the journal distinguishes them |
+| `RootMismatch` | that the journal as a whole no longer matches the stored root | **any single entry.** Every entry is self-consistent, so the cause is a state-file edit or whole entries added, dropped or reordered. It carries no `seq` because attributing it to one would be fabricated |
+| `SeqMismatch` | the exact position whose `seq` is out of order | — |
+
+Localising a `RootMismatch` any further would need an independent record of the expected
+entry set. A journal plus its own state file cannot provide that — which is the argument for
+archiving `export` output somewhere the attacker does not control.
 
 **`export`** — prints a JSON snapshot containing the Merkle root and the full ordered list of per-entry hashes. Archive this externally so a local root-modification attack is also detectable.
 
@@ -122,7 +135,7 @@ The demo:
 1. Generates a 20-entry sample log (`demo/generate_log.py`)
 2. Ingests it into the journal
 3. Verifies clean
-4. Exports a signed snapshot
+4. Exports a committed snapshot
 5. Surgically modifies one historical entry in the journal
 6. Re-verifies — logchain catches exactly the tampered entry
 
@@ -146,12 +159,16 @@ Expected output at step 7:
 cargo test
 ```
 
-**47 tests total:**
+**48 tests total:**
 - `src/hasher.rs` — 5 unit tests (known SHA-256 values, determinism, order sensitivity, hex round-trip)
-- `src/merkle.rs` — 25 unit tests (root construction for 0–5 leaves, duplication rule, all-leaf tamper coverage, 7 proof tests, manual computation verification)
+- `src/merkle.rs` — 19 unit tests (root construction for 0–5 leaves, duplication rule, all-leaf tamper coverage, proof generation and verification, manual computation verification)
 - `src/journal.rs` — 7 unit tests (append, sequential seqs, hash correctness, state update, state persistence, empty journal, incremental ingest)
-- `src/verify.rs` — 6 unit tests (clean, empty, raw-tamper detection, hash-tamper detection, single entry, count + root match)
-- `tests/integration.rs` — 9 end-to-end tests (ingest→verify clean, incremental ingest, raw-tamper caught, hash-tamper caught, export count/root, export hash correctness, root changes after tamper, empty clean, single-entry round-trip)
+- `src/verify.rs` — 7 unit tests (clean, empty, entry-hash mismatch detection, hash-field tamper detection, single entry, count + root match)
+- `tests/integration.rs` — 10 end-to-end tests (ingest→verify clean, incremental ingest, raw-tamper caught, hash-tamper caught, **state-root tamper caught and not blamed on an entry**, export count/root, export hash correctness, root changes after tamper, empty clean, single-entry round-trip)
+
+Five of these are the ones that matter: they write a real journal, corrupt it on disk, and
+assert the specific failure. A tamper-evidence claim that is only tested on the happy path
+is not evidence of anything.
 
 ---
 

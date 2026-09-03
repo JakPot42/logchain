@@ -4,11 +4,20 @@ use crate::merkle::compute_root;
 
 #[derive(Debug)]
 pub enum Tamper {
-    /// The raw text no longer matches its stored SHA-256 hash.
-    RawModified { seq: usize, stored: String, recomputed: String },
-    /// The stored hash field was changed directly (hash != SHA-256(raw), but
-    /// also the Merkle root no longer matches what the stored hashes produce).
-    HashModified { seq: usize },
+    /// An entry's `raw` and its stored `hash` disagree: SHA-256(raw) != hash.
+    ///
+    /// This is deliberately NOT called "raw modified", because the check is
+    /// symmetric and cannot tell which side moved.  Editing `raw` and editing
+    /// `hash` both produce exactly this condition, and nothing in the journal
+    /// distinguishes them.  Localisation is to the entry, not to the field.
+    EntryHashMismatch { seq: usize, stored: String, recomputed: String },
+    /// Every entry is internally consistent, but the Merkle root recomputed
+    /// from the journal does not match the root stored in the state file.
+    ///
+    /// This is what a state-file edit looks like, and also what truncating,
+    /// reordering or dropping whole entries looks like.  It is NOT attributable
+    /// to any single entry, which is why it carries no `seq`.
+    RootMismatch,
     /// An entry's seq field doesn't match its position in the file.
     SeqMismatch { position: usize, stored_seq: usize },
 }
@@ -53,7 +62,7 @@ pub fn check_journal(paths: &DataPaths) -> Result<VerifyResult, crate::journal::
 
         let recomputed = to_hex(hash_bytes(entry.raw.as_bytes()));
         if recomputed != entry.hash {
-            tampered_entries.push(Tamper::RawModified {
+            tampered_entries.push(Tamper::EntryHashMismatch {
                 seq: entry.seq,
                 stored: entry.hash.clone(),
                 recomputed,
@@ -71,30 +80,19 @@ pub fn check_journal(paths: &DataPaths) -> Result<VerifyResult, crate::journal::
 
     let root_matches = merkle_root_stored == merkle_root_recomputed;
 
-    // If the root doesn't match but we haven't flagged any per-entry raw
-    // mismatch, the attacker modified the hash field directly.
+    // A root mismatch with no per-entry inconsistency means the damage is not
+    // inside any single entry: the state file was edited, or whole entries were
+    // added, dropped or reordered while each remaining one stayed self-consistent.
+    // That is reported as exactly what it is, with no seq attached, rather than
+    // guessed at.  Localising it further would require an independent record of
+    // the expected entry set, which a single journal plus its own state file
+    // cannot provide.
     if !root_matches {
-        // Find which entries have a hash that's inconsistent with root mismatch
-        // but a raw field that still matches.  These are hash-field tamperings.
-        for entry in &entries {
-            let recomputed_raw = to_hex(hash_bytes(entry.raw.as_bytes()));
-            if recomputed_raw == entry.hash {
-                // raw→hash is consistent; the problem is upstream in the tree.
-                // We can't pinpoint the exact entry without bisecting; flag all
-                // such entries as potential hash-modification targets only when
-                // the root doesn't match.
-            }
-        }
-        // As a simpler signal: if root mismatches and we have no per-entry
-        // raw tampering, flag a generic hash-field modification on the first
-        // entry whose hash changed. In practice the Merkle root mismatch
-        // already tells the user everything they need.
-        //
-        // Only add a HashModified entry if there are no RawModified entries
-        // (to avoid double-flagging the same event).
-        let has_raw_mismatch = tampered_entries.iter().any(|t| matches!(t, Tamper::RawModified { .. }));
-        if !has_raw_mismatch && !entries.is_empty() {
-            tampered_entries.push(Tamper::HashModified { seq: 0 });
+        let per_entry_inconsistency = tampered_entries
+            .iter()
+            .any(|t| matches!(t, Tamper::EntryHashMismatch { .. }));
+        if !per_entry_inconsistency {
+            tampered_entries.push(Tamper::RootMismatch);
         }
     }
 
@@ -176,8 +174,8 @@ mod tests {
         // Root may still match (root is computed from stored hashes, not raw);
         // the tampering is caught at level 1 (raw → stored_hash mismatch).
         assert!(
-            result.tampered_entries.iter().any(|t| matches!(t, Tamper::RawModified { seq: 1, .. })),
-            "should flag seq=1 as RawModified"
+            result.tampered_entries.iter().any(|t| matches!(t, Tamper::EntryHashMismatch { seq: 1, .. })),
+            "should flag seq=1 as EntryHashMismatch"
         );
     }
 

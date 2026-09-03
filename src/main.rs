@@ -43,7 +43,7 @@ enum Command {
     /// Verify the integrity of the entire journal against the stored Merkle root.
     Verify,
 
-    /// Export a signed Merkle snapshot for archival (JSON to stdout).
+    /// Export a committed Merkle snapshot for archival (JSON to stdout).
     Export,
 
     /// Show the current journal status (entry count, Merkle root, last updated).

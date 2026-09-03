@@ -105,7 +105,7 @@ fn tamper_raw_field_is_caught() {
     assert!(!result.clean, "verify must detect raw tampering");
     // Root is computed from stored hashes; modifying only raw leaves the root
     // intact. Tampering is caught at level 1 (raw → stored_hash mismatch).
-    assert!(result.tampered_entries.iter().any(|t| matches!(t, logchain::verify::Tamper::RawModified { .. })));
+    assert!(result.tampered_entries.iter().any(|t| matches!(t, logchain::verify::Tamper::EntryHashMismatch { .. })));
 }
 
 // ── Tamper: modify hash field → verify catches it ────────────────────────────
@@ -236,6 +236,52 @@ fn merkle_root_changes_after_tamper() {
 }
 
 // ── Empty journal is always clean ─────────────────────────────────────────────
+
+/// The case `RootMismatch` exists for, which had no test before.
+///
+/// Every entry stays internally consistent (raw and hash still agree), so level 1
+/// finds nothing. Only the aggregate check catches it. This is what editing the
+/// state file looks like, and it is the attack the two-level design exists to stop:
+/// an attacker who rewrites an entry AND its hash still cannot fix the root without
+/// the state file, and an attacker who rewrites the state file cannot make it agree
+/// with a journal they did not also rewrite consistently.
+#[test]
+fn tampering_the_state_root_alone_is_caught_and_not_blamed_on_an_entry() {
+    let dir = tmp();
+    let p = paths(&dir);
+
+    for i in 0..4 {
+        append_entry(&format!("entry {i}"), &p.journal, &p.state).unwrap();
+    }
+    assert!(is_clean(&p).unwrap());
+
+    // Rewrite ONLY the stored Merkle root. The journal is untouched.
+    let mut state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&p.state).unwrap()).unwrap();
+    state["merkle_root"] = serde_json::Value::String(
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+    );
+    fs::write(&p.state, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+    let result = check_journal(&p).unwrap();
+    assert!(!result.clean, "a rewritten state root must be caught");
+    assert!(!result.root_matches);
+
+    // Exactly one finding, and it must NOT be attributed to any entry: every
+    // entry is self-consistent, so blaming one would be a fabricated localisation.
+    assert_eq!(result.tampered_entries.len(), 1);
+    assert!(matches!(
+        result.tampered_entries[0],
+        logchain::verify::Tamper::RootMismatch
+    ));
+    assert!(
+        !result
+            .tampered_entries
+            .iter()
+            .any(|t| matches!(t, logchain::verify::Tamper::EntryHashMismatch { .. })),
+        "no entry-level finding should be invented for a state-file edit"
+    );
+}
 
 #[test]
 fn empty_journal_is_clean() {

@@ -7,7 +7,7 @@
       1. Generate a realistic sample log
       2. Ingest it into the Merkle journal
       3. Verify clean (all entries intact)
-      4. Export a signed snapshot
+      4. Export a committed snapshot
       5. Surgically tamper with a historical journal entry
       6. Verify again - show that logchain catches the tampering
 
@@ -102,7 +102,7 @@ OK "Journal is clean - Merkle root matches all entries."
 
 # ── Step 5: Export snapshot ───────────────────────────────────────────────────
 
-Step 5 "Exporting signed Merkle snapshot for archival"
+Step 5 "Exporting committed Merkle snapshot for archival"
 & $Binary --data-dir $DataDir export | Tee-Object -FilePath $SnapshotFile
 OK "Snapshot written to: $SnapshotFile"
 $Root = (Get-Content $SnapshotFile | ConvertFrom-Json).merkle_root

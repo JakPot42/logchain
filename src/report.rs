@@ -61,20 +61,33 @@ pub fn print_verify_result(result: &VerifyResult) {
 
         for tamper in &result.tampered_entries {
             match tamper {
-                Tamper::RawModified { seq, stored, recomputed } => {
+                Tamper::EntryHashMismatch { seq, stored, recomputed } => {
                     println!(
-                        "    {} seq={}: raw content modified",
+                        "    {} seq={}: raw content and stored hash disagree",
                         "TAMPERED".red().bold(),
                         seq
                     );
                     println!("        stored hash:     {}", stored.dimmed());
                     println!("        recomputed hash: {}", recomputed.red());
-                }
-                Tamper::HashModified { seq } => {
                     println!(
-                        "    {} seq={}: hash field modified directly (raw→hash consistent but Merkle root broken)",
+                        "        {}",
+                        "(cannot tell which side was edited - the check is symmetric)".dimmed()
+                    );
+                }
+                Tamper::RootMismatch => {
+                    println!(
+                        "    {} stored Merkle root does not match the journal",
                         "TAMPERED".red().bold(),
-                        seq
+                    );
+                    println!(
+                        "        {}",
+                        "(every entry is self-consistent, so entries were added, dropped or"
+                            .dimmed()
+                    );
+                    println!(
+                        "        {}",
+                        " reordered, or the state file was edited - not attributable to one entry)"
+                            .dimmed()
                     );
                 }
                 Tamper::SeqMismatch { position, stored_seq } => {
@@ -104,10 +117,14 @@ pub fn print_verify_result(result: &VerifyResult) {
 
 // ── Export snapshot ───────────────────────────────────────────────────────────
 
-/// A signed snapshot suitable for archival to an external system.
-/// "Signed" here means cryptographically committed: the Merkle root is the
-/// commitment over the full ordered log history.  Anyone holding the root can
-/// verify any individual entry with an O(log n) Merkle proof.
+/// A committed snapshot suitable for archival to an external system.
+///
+/// NOT digitally signed.  There is no keypair and no signature anywhere in this
+/// crate.  "Committed" means the Merkle root is a cryptographic commitment over
+/// the full ordered log history: anyone holding the root can verify any
+/// individual entry with an O(log n) Merkle proof, but nothing here attests to
+/// WHO produced the snapshot.  Authenticating the producer requires a signature
+/// scheme this crate does not implement.
 #[derive(Debug, Serialize)]
 pub struct ExportSnapshot {
     pub snapshot_version: &'static str,
