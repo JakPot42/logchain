@@ -1,0 +1,22 @@
+# Normalise line endings to LF in the repository, always.
+#
+# Without this, an editor or tool on Windows can rewrite every file to CRLF and
+# produce a diff where every file appears fully changed - 24,996 insertions and
+# 24,996 deletions, with zero content difference. That diff looks like real work,
+# is not, and committing it would destroy `git blame` across the whole repo.
+#
+# `text=auto` lets git decide which files are text; `eol=lf` fixes what goes into
+# the repository. Working-tree endings on Windows are unaffected for tools that
+# care.
+* text=auto eol=lf
+
+# Files that must stay byte-exact regardless of platform.
+*.png binary
+*.jpg binary
+*.gif binary
+*.pdf binary
+*.zip binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
