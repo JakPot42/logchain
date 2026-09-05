@@ -172,6 +172,26 @@ is not evidence of anything.
 
 ---
 
+## What tamper-evidence does not cover
+
+logchain proves that entries in the journal were not altered after they were written. It
+proves nothing about entries that were never written, and nothing about an entry that was
+written accurately but left something out. A well-formed log line committed to the Merkle tree
+verifies exactly the same whether or not it tells the whole story, because the commitment is
+over the bytes it was given.
+
+That gap is not an unfinished feature here. Testing whether a record is *complete* requires
+starting from an independent population the operator does not control, which is a different
+kind of work from hashing.
+
+[**You cannot prove nothing was hidden**](https://github.com/JakPot42/filing-check/blob/master/docs/you-cannot-prove-nothing-was-hidden.md)
+is an essay on exactly this boundary: what Merkle chains, Certificate Transparency, witness
+cosigning and RFC 3161 timestamping genuinely deliver, why none of it reaches a filed report
+that is false by omission, and what the measured result was when the independent-population
+approach was actually built and run against live public data ([filing-check](https://github.com/JakPot42/filing-check)).
+
+---
+
 ## Connection to portfolio themes
 
 This project connects two threads running through the broader portfolio:
