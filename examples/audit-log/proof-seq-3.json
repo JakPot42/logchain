@@ -1,0 +1,21 @@
+{
+  "proof_version": "1",
+  "seq": 3,
+  "entry_count": 7,
+  "leaf_hash": "18e1aaeb1177171e5522b0d34695ff5f9968ef1ad52cbb8512c15d84ce913987",
+  "merkle_root": "11671fa9483717828eaf704669fa70b8168f405e55628394adaf618d64c6cb15",
+  "path": [
+    {
+      "hash": "07fcc1de8d1a66609061eedb76295c98893947f1375f904e5d454db632e1d2c0",
+      "side": "left"
+    },
+    {
+      "hash": "0578f856312955d7ecece618456f38af010bd3a51bba555d2329188368995cb5",
+      "side": "left"
+    },
+    {
+      "hash": "f797164d007304dfad7136b89e3b3b4c163e5b77763b6d67773e0236080233d8",
+      "side": "right"
+    }
+  ]
+}
