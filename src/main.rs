@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use logchain::journal::{append_entry, ingest_file, load_state, read_entries, DataPaths};
+use logchain::journal::{append_entry, ingest_file, leaf_hashes, load_state, read_entries, DataPaths};
 use logchain::report::{
-    build_export, print_export, print_ingest_summary, print_ingested, print_status,
-    print_verify_result,
+    build_export, build_inclusion_proof, print_export, print_inclusion_proof, print_ingest_summary,
+    print_ingested, print_status, print_verify_result,
 };
 use logchain::verify::check_journal;
 
@@ -46,6 +46,12 @@ enum Command {
     /// Export a committed Merkle snapshot for archival (JSON to stdout).
     Export,
 
+    /// Emit a Merkle inclusion proof for one entry (JSON to stdout).
+    Prove {
+        /// Zero-based sequence number of the entry to prove.
+        seq: usize,
+    },
+
     /// Show the current journal status (entry count, Merkle root, last updated).
     Status,
 }
@@ -70,6 +76,9 @@ fn main() {
         }
         Command::Export => {
             cmd_export(&paths);
+        }
+        Command::Prove { seq } => {
+            cmd_prove(seq, &paths);
         }
         Command::Status => {
             cmd_status(&paths);
@@ -186,6 +195,34 @@ fn cmd_export(paths: &DataPaths) {
 
     let snapshot = build_export(&state, &entries);
     print_export(&snapshot);
+}
+
+// ── prove ─────────────────────────────────────────────────────────────────────
+
+fn cmd_prove(seq: usize, paths: &DataPaths) {
+    let entries = match read_entries(&paths.journal) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("error reading journal: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let leaves = match leaf_hashes(&entries) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error decoding entry hashes: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    match build_inclusion_proof(seq, &entries, &leaves) {
+        Some(proof) => print_inclusion_proof(&proof),
+        None => {
+            eprintln!("error: no entry with seq={seq} (journal has {} entries)", entries.len());
+            std::process::exit(1);
+        }
+    }
 }
 
 // ── status ────────────────────────────────────────────────────────────────────

@@ -2,7 +2,9 @@ use chrono::Utc;
 use colored::Colorize;
 use serde::Serialize;
 
+use crate::hasher::{to_hex, Hash};
 use crate::journal::{JournalEntry, LogchainState};
+use crate::merkle::{compute_root, generate_proof, Side};
 use crate::verify::{Tamper, VerifyResult};
 
 // ── Verify report ─────────────────────────────────────────────────────────────
@@ -164,6 +166,62 @@ pub fn print_export(snapshot: &ExportSnapshot) {
     match serde_json::to_string_pretty(snapshot) {
         Ok(json) => println!("{json}"),
         Err(e) => eprintln!("export serialization error: {e}"),
+    }
+}
+
+// ── Inclusion proof ──────────────────────────────────────────────────────
+
+/// A single Merkle inclusion proof, in the on-disk form documented in
+/// `docs/FORMAT.md`.  Emitted so that a holder of the root can check one entry
+/// without the journal, using any implementation of the format.
+#[derive(Debug, Serialize)]
+pub struct InclusionProofFile {
+    pub proof_version: &'static str,
+    pub seq: usize,
+    pub entry_count: usize,
+    pub leaf_hash: String,
+    pub merkle_root: Option<String>,
+    pub path: Vec<ProofStepRecord>,
+}
+
+/// One sibling on the path from the leaf to the root.  `side` says where the
+/// SIBLING sits, which is what fixes the argument order at verification time.
+#[derive(Debug, Serialize)]
+pub struct ProofStepRecord {
+    pub hash: String,
+    pub side: &'static str,
+}
+
+/// Build the proof file for `seq`.  Returns `None` if `seq` is out of range.
+pub fn build_inclusion_proof(
+    seq: usize,
+    entries: &[JournalEntry],
+    leaves: &[Hash],
+) -> Option<InclusionProofFile> {
+    let nodes = generate_proof(leaves, seq)?;
+    Some(InclusionProofFile {
+        proof_version: "1",
+        seq,
+        entry_count: entries.len(),
+        leaf_hash: to_hex(leaves[seq]),
+        merkle_root: compute_root(leaves).map(to_hex),
+        path: nodes
+            .iter()
+            .map(|n| ProofStepRecord {
+                hash: to_hex(n.hash),
+                side: match n.side {
+                    Side::Left => "left",
+                    Side::Right => "right",
+                },
+            })
+            .collect(),
+    })
+}
+
+pub fn print_inclusion_proof(proof: &InclusionProofFile) {
+    match serde_json::to_string_pretty(proof) {
+        Ok(json) => println!("{json}"),
+        Err(e) => eprintln!("proof serialization error: {e}"),
     }
 }
 
