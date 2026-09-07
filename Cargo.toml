@@ -1,8 +1,8 @@
 [package]
 name = "logchain"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-description = "Secure Log Aggregator with Merkle Integrity — tamper-evident audit trails via SHA-256 Merkle trees"
+description = "Secure Log Aggregator with Merkle Integrity — tamper-evident audit trails via RFC 6962 SHA-256 Merkle trees"
 
 [lib]
 name = "logchain"

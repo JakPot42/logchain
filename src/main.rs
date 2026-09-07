@@ -11,7 +11,7 @@ use logchain::report::{
     build_export, build_inclusion_proof, print_export, print_inclusion_proof, print_ingest_summary,
     print_ingested, print_status, print_verify_result,
 };
-use logchain::verify::check_journal;
+use logchain::verify::check_journal_against;
 
 #[derive(Parser)]
 #[command(name = "logchain", about = "Tamper-evident log aggregator with Merkle integrity")]
@@ -40,8 +40,17 @@ enum Command {
         once: bool,
     },
 
-    /// Verify the integrity of the entire journal against the stored Merkle root.
-    Verify,
+    /// Verify the integrity of the entire journal.
+    ///
+    /// With no `--root`, the journal is compared against the root in its own
+    /// state file, which proves only that the two files agree - anyone who can
+    /// edit one can edit the other. Supply `--root` with a root held somewhere
+    /// the writer cannot reach to get an answer that means something.
+    Verify {
+        /// Published Merkle root to check against, hex, instead of the state file.
+        #[arg(long)]
+        root: Option<String>,
+    },
 
     /// Export a committed Merkle snapshot for archival (JSON to stdout).
     Export,
@@ -71,8 +80,8 @@ fn main() {
         Command::Tail { file, interval_ms, once } => {
             cmd_tail(&file, &paths, interval_ms, once);
         }
-        Command::Verify => {
-            cmd_verify(&paths);
+        Command::Verify { root } => {
+            cmd_verify(&paths, root.as_deref());
         }
         Command::Export => {
             cmd_export(&paths);
@@ -159,10 +168,22 @@ fn cmd_tail(log_path: &PathBuf, paths: &DataPaths, interval_ms: u64, once: bool)
 
 // ── verify ────────────────────────────────────────────────────────────────────
 
-fn cmd_verify(paths: &DataPaths) {
-    match check_journal(paths) {
+fn cmd_verify(paths: &DataPaths, root_override: Option<&str>) {
+    match check_journal_against(paths, root_override) {
         Ok(result) => {
             print_verify_result(&result);
+            if root_override.is_none() {
+                eprintln!(
+                    "
+note: checked against this journal's own state file, which whoever can"
+                );
+                eprintln!(
+                    "      write the journal can also rewrite. For evidence against them,"
+                );
+                eprintln!(
+                    "      re-run with --root <the externally published root>."
+                );
+            }
             if !result.clean {
                 std::process::exit(2);
             }

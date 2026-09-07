@@ -6,7 +6,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::hasher::{from_hex, hash_bytes, to_hex, Hash};
+use crate::hasher::{from_hex, hash_leaf, to_hex, Hash};
 use crate::merkle::compute_root;
 
 #[derive(Error, Debug)]
@@ -19,6 +19,27 @@ pub enum JournalError {
     BadHex(#[from] hex::FromHexError),
     #[error("entry count mismatch: state says {state}, journal has {actual}")]
     CountMismatch { state: usize, actual: usize },
+    #[error(
+        "unsupported journal format version {found} (this build reads version {expected}).\n  \
+A version 1 journal hashes its leaves without the RFC 6962 0x00 prefix and builds\n  \
+the tree by pairing odd nodes with themselves, so its roots are not comparable with\n  \
+version {expected} roots. It must be re-ingested. See docs/FORMAT.md section 1.1."
+    )]
+    UnsupportedFormatVersion { found: u32, expected: u32 },
+}
+
+/// The on-disk format version this build reads and writes.
+///
+/// Version 1 is deliberately NOT supported. It hashed leaves as bare
+/// `SHA-256(raw)` and built the tree by pairing an odd level's last node with
+/// itself, which let a journal gain a duplicate final entry without changing its
+/// root. Reading a v1 journal with v2 rules would report every entry as
+/// mismatched, so it is rejected up front with an explanation instead.
+pub const FORMAT_VERSION: u32 = 2;
+
+/// A state file written before the version field existed is a version 1 file.
+fn default_format_version() -> u32 {
+    1
 }
 
 /// One persisted log entry.  Written as a single JSON object per line
@@ -30,8 +51,9 @@ pub struct JournalEntry {
     pub seq: usize,
     /// RFC 3339 timestamp of when this entry was ingested (not the log's own timestamp).
     pub ingested_at: String,
-    /// SHA-256 of `raw`, hex-encoded.  Stored alongside the text so that
-    /// `verify` can detect raw-text tampering by recomputing and comparing.
+    /// The RFC 6962 leaf hash of `raw`: `SHA-256(0x00 || utf8(raw))`, hex-encoded.
+    /// Stored alongside the text so that `verify` can detect raw-text tampering
+    /// by recomputing and comparing.
     pub hash: String,
     /// The original log line, verbatim.
     pub raw: String,
@@ -41,6 +63,10 @@ pub struct JournalEntry {
 /// it can be compared independently (or archived out-of-band).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogchainState {
+    /// On-disk format version. Absent in version 1 files, which is how they are
+    /// identified and rejected.
+    #[serde(default = "default_format_version")]
+    pub format_version: u32,
     /// Hex-encoded Merkle root over all `hash` fields in the journal, in order.
     /// `None` means no entries have been ingested yet.
     pub merkle_root: Option<String>,
@@ -53,6 +79,7 @@ pub struct LogchainState {
 impl Default for LogchainState {
     fn default() -> Self {
         Self {
+            format_version: FORMAT_VERSION,
             merkle_root: None,
             entry_count: 0,
             last_updated: Utc::now().to_rfc3339(),
@@ -82,7 +109,14 @@ pub fn load_state(path: &Path) -> Result<LogchainState, JournalError> {
         return Ok(LogchainState::default());
     }
     let text = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&text)?)
+    let state: LogchainState = serde_json::from_str(&text)?;
+    if state.format_version != FORMAT_VERSION {
+        return Err(JournalError::UnsupportedFormatVersion {
+            found: state.format_version,
+            expected: FORMAT_VERSION,
+        });
+    }
+    Ok(state)
 }
 
 pub fn save_state(path: &Path, state: &LogchainState) -> Result<(), JournalError> {
@@ -102,7 +136,7 @@ pub fn append_entry(
 ) -> Result<JournalEntry, JournalError> {
     let state = load_state(state_path)?;
     let seq = state.entry_count;
-    let entry_hash = hash_bytes(raw.as_bytes());
+    let entry_hash = hash_leaf(raw.as_bytes());
 
     let entry = JournalEntry {
         seq,
@@ -122,6 +156,7 @@ pub fn append_entry(
     let new_root = recompute_root_from_journal(journal_path)?;
 
     let new_state = LogchainState {
+        format_version: FORMAT_VERSION,
         merkle_root: new_root.map(to_hex),
         entry_count: seq + 1,
         last_updated: Utc::now().to_rfc3339(),
@@ -244,7 +279,7 @@ pub mod tests {
         append_entry(raw, &paths.journal, &paths.state).unwrap();
 
         let entries = read_entries(&paths.journal).unwrap();
-        let expected_hash = to_hex(hash_bytes(raw.as_bytes()));
+        let expected_hash = to_hex(hash_leaf(raw.as_bytes()));
         assert_eq!(entries[0].hash, expected_hash);
     }
 
@@ -269,6 +304,7 @@ pub mod tests {
         let state_path = dir.path().join("test.state");
 
         let s = LogchainState {
+            format_version: FORMAT_VERSION,
             merkle_root: Some("deadbeef".to_string()),
             entry_count: 7,
             last_updated: "2026-01-01T00:00:00Z".to_string(),

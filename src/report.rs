@@ -3,7 +3,7 @@ use colored::Colorize;
 use serde::Serialize;
 
 use crate::hasher::{to_hex, Hash};
-use crate::journal::{JournalEntry, LogchainState};
+use crate::journal::{JournalEntry, LogchainState, FORMAT_VERSION};
 use crate::merkle::{compute_root, generate_proof, Side};
 use crate::verify::{Tamper, VerifyResult};
 
@@ -92,6 +92,26 @@ pub fn print_verify_result(result: &VerifyResult) {
                             .dimmed()
                     );
                 }
+                Tamper::LegacyV1Journal { entry_count } => {
+                    println!(
+                        "    {} this is a FORMAT VERSION 1 journal ({} entries)",
+                        "UNSUPPORTED".yellow().bold(),
+                        entry_count
+                    );
+                    println!(
+                        "        {}",
+                        "every entry matches the v1 leaf rule SHA-256(raw), not v2's".dimmed()
+                    );
+                    println!(
+                        "        {}",
+                        "SHA-256(0x00 || raw). Nothing here is tampered - the format".dimmed()
+                    );
+                    println!(
+                        "        {}",
+                        "changed, and v1 roots are not comparable with v2 roots.".dimmed()
+                    );
+                    println!("        {}", "See docs/FORMAT.md section 1.1.".dimmed());
+                }
                 Tamper::SeqMismatch { position, stored_seq } => {
                     println!(
                         "    {} position {}: seq field is {} (expected {})",
@@ -130,6 +150,8 @@ pub fn print_verify_result(result: &VerifyResult) {
 #[derive(Debug, Serialize)]
 pub struct ExportSnapshot {
     pub snapshot_version: &'static str,
+    /// Journal format version these hashes and this root were computed under.
+    pub format_version: u32,
     pub exported_at: String,
     pub entry_count: usize,
     pub merkle_root: Option<String>,
@@ -147,7 +169,8 @@ pub struct EntryHashRecord {
 
 pub fn build_export(state: &LogchainState, entries: &[JournalEntry]) -> ExportSnapshot {
     ExportSnapshot {
-        snapshot_version: "1",
+        snapshot_version: "2",
+        format_version: FORMAT_VERSION,
         exported_at: Utc::now().to_rfc3339(),
         entry_count: state.entry_count,
         merkle_root: state.merkle_root.clone(),
@@ -177,6 +200,9 @@ pub fn print_export(snapshot: &ExportSnapshot) {
 #[derive(Debug, Serialize)]
 pub struct InclusionProofFile {
     pub proof_version: &'static str,
+    /// Journal format version this proof was cut under. A v1 proof and a v2
+    /// proof are not interchangeable: the hashing and the tree shape differ.
+    pub format_version: u32,
     pub seq: usize,
     pub entry_count: usize,
     pub leaf_hash: String,
@@ -200,7 +226,8 @@ pub fn build_inclusion_proof(
 ) -> Option<InclusionProofFile> {
     let nodes = generate_proof(leaves, seq)?;
     Some(InclusionProofFile {
-        proof_version: "1",
+        proof_version: "2",
+        format_version: FORMAT_VERSION,
         seq,
         entry_count: entries.len(),
         leaf_hash: to_hex(leaves[seq]),
@@ -231,6 +258,7 @@ pub fn print_status(state: &LogchainState) {
     println!();
     println!("{}", "═══ Logchain Status ═══".bold());
     println!();
+    println!("  {}  {}", "Format version:".dimmed(), state.format_version.to_string().bold());
     println!("  {}  {}", "Entries:".dimmed(), state.entry_count.to_string().bold());
     match &state.merkle_root {
         Some(r) => println!("  {}  {}", "Merkle root:".dimmed(), r.green()),

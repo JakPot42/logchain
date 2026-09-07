@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::Write;
 
-use logchain::hasher::{hash_bytes, to_hex};
+use logchain::hasher::{hash_leaf, to_hex};
 use logchain::journal::{append_entry, ingest_file, load_state, read_entries, DataPaths};
 use logchain::verify::{check_journal, is_clean};
 
@@ -184,7 +184,7 @@ fn export_hashes_match_raw_content() {
     let snapshot = logchain::report::build_export(&state, &entries);
 
     for (record, raw) in snapshot.entry_hashes.iter().zip(raw_lines.iter()) {
-        let expected = to_hex(hash_bytes(raw.as_bytes()));
+        let expected = to_hex(hash_leaf(raw.as_bytes()));
         assert_eq!(record.hash, expected, "hash mismatch for raw={raw}");
     }
 }
@@ -212,7 +212,7 @@ fn merkle_root_changes_after_tamper() {
                 entry["raw"] = serde_json::Value::String("tampered".to_string());
                 // Also update the hash so level-1 doesn't immediately catch it —
                 // only the Merkle root mismatch should fire.
-                let new_hash = to_hex(hash_bytes(b"tampered"));
+                let new_hash = to_hex(hash_leaf(b"tampered"));
                 entry["hash"] = serde_json::Value::String(new_hash);
                 serde_json::to_string(&entry).unwrap()
             } else {
@@ -302,7 +302,7 @@ fn single_entry_full_round_trip() {
 
     assert_eq!(entry.seq, 0);
     assert_eq!(entry.raw, raw);
-    assert_eq!(entry.hash, to_hex(hash_bytes(raw.as_bytes())));
+    assert_eq!(entry.hash, to_hex(hash_leaf(raw.as_bytes())));
 
     let state = load_state(&p.state).unwrap();
     assert_eq!(state.entry_count, 1);

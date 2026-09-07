@@ -3,3 +3,7 @@ logchain-data/
 demo/data/
 demo/sample.log
 demo/snapshot.json
+
+# Python bytecode from the reference verifier
+__pycache__/
+*.pyc

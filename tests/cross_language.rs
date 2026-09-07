@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use logchain::hasher::{hash_bytes, to_hex};
+use logchain::hasher::{hash_bytes, hash_leaf, to_hex};
 use logchain::journal::{append_entry, DataPaths};
 use logchain::verify::{check_journal, Tamper, VerifyResult};
 
@@ -76,6 +76,9 @@ fn rust_findings(result: &VerifyResult) -> Vec<String> {
             Tamper::SeqMismatch { position, stored_seq } => {
                 format!("SeqMismatch position={position} stored_seq={stored_seq}")
             }
+            Tamper::LegacyV1Journal { entry_count } => {
+                format!("LegacyV1Journal entry_count={entry_count}")
+            }
         })
         .collect()
 }
@@ -98,6 +101,9 @@ fn reference_findings(value: &serde_json::Value) -> Vec<String> {
                 "SeqMismatch position={} stored_seq={}",
                 f["position"], f["stored_seq"]
             ),
+            "LegacyV1Journal" => {
+                format!("LegacyV1Journal entry_count={}", f["entry_count"])
+            }
             other => panic!("unknown finding from reference verifier: {other}"),
         })
         .collect()
@@ -193,7 +199,7 @@ fn agree_on_single_entry() {
     // For one entry the root IS the leaf; both sides must land on that.
     assert_eq!(
         r.merkle_root_recomputed,
-        Some(to_hex(hash_bytes(b"2026-06-30T12:00:00Z INFO  system ready")))
+        Some(to_hex(hash_leaf(b"2026-06-30T12:00:00Z INFO  system ready")))
     );
 }
 
@@ -289,7 +295,7 @@ fn agree_on_consistent_entry_rewrite() {
     ingest(&p, 5, "line");
     edit_line(&p.journal, 2, |e| {
         e["raw"] = serde_json::Value::String("tampered".to_string());
-        e["hash"] = serde_json::Value::String(to_hex(hash_bytes(b"tampered")));
+        e["hash"] = serde_json::Value::String(to_hex(hash_leaf(b"tampered")));
     });
 
     let r = assert_implementations_agree(&p, "entry and hash rewritten together");
@@ -332,50 +338,57 @@ fn agree_on_deleted_entry() {
 
 // -- known format defect, pinned ---------------------------------------------
 
-/// A KNOWN DEFECT of format version 1, recorded here so it cannot change silently
-/// and cannot be mistaken for a passing security property. See docs/FORMAT.md §7.
+/// REGRESSION TEST FOR THE DEFECT FORMAT VERSION 2 EXISTS TO FIX.
 ///
-/// Because odd nodes are paired with themselves, appending a duplicate of the last
-/// entry to an odd-length journal leaves the root unchanged. With the added line's
-/// `seq` renumbered to match its position, no core finding fires in either
-/// implementation: the forged journal verifies clean against the genuine root.
+/// Under version 1 this exact fixture PASSED. Odd nodes were paired with
+/// themselves, so appending a duplicate of the last entry to an odd-length
+/// journal left the root byte-identical; with the added line's `seq` renumbered
+/// to match its position, no finding fired in either implementation and the
+/// forged journal verified clean against the genuine root. That is Bitcoin's
+/// CVE-2012-2459, and it is documented in docs/FORMAT.md §5.2 and docs/LIMITS.md.
 ///
-/// This test asserts the defect is real and that BOTH implementations exhibit it —
-/// they agree, so this is a property of the format, not of either verifier. It then
-/// asserts the documented mitigation actually works: the published entry count, which
-/// the root cannot carry, catches it.
+/// Under version 2 the forgery must FAIL. The RFC 6962 construction makes the
+/// tree shape a function of the leaf count, so an 8-entry journal cannot produce
+/// a 7-entry journal's root. Both implementations must reject it, and must reject
+/// it the same way.
+///
+/// Note what does NOT fix this: domain separation alone. `hash_node(h6, h6)` is
+/// the same computation with or without a 0x01 prefix, so the prefixes leave the
+/// collision fully intact. That is proven directly in
+/// `merkle::tests::domain_separation_alone_would_not_have_fixed_the_v1_collision`.
 #[test]
-fn duplicated_last_entry_collides_with_the_genuine_root() {
+fn duplicated_last_entry_no_longer_collides_with_the_genuine_root() {
     let dir = tmp();
     let p = DataPaths::from_dir(dir.path());
-    ingest(&p, 7, "line"); // odd count is what makes the collision possible
+    ingest(&p, 7, "line"); // the odd count that made the v1 collision possible
 
     let genuine_root = check_journal(&p).unwrap().merkle_root_recomputed.unwrap();
 
     // Append a copy of the last entry, renumbered so seq still matches position.
+    // Under v1 this was undetectable. Under v2 it must not be.
     let content = fs::read_to_string(&p.journal).unwrap();
     let mut last: serde_json::Value =
         serde_json::from_str(content.lines().last().unwrap()).unwrap();
     last["seq"] = serde_json::Value::from(7u64);
     fs::write(
         &p.journal,
-        format!("{}{}\n", content, serde_json::to_string(&last).unwrap()),
+        format!("{}{}
+", content, serde_json::to_string(&last).unwrap()),
     )
     .unwrap();
 
-    // The forged journal has 8 entries and the SAME root, and both implementations
-    // call it clean. That is the defect.
-    let r = assert_implementations_agree(&p, "duplicated last entry");
+    // Both implementations must agree, and both must now compute a DIFFERENT root.
+    let r = assert_implementations_agree(&p, "duplicated last entry (v2)");
     assert_eq!(r.entry_count, 8, "the forged journal really does have 8 entries");
-    assert_eq!(
+    assert_ne!(
         r.merkle_root_recomputed.as_deref(),
         Some(genuine_root.as_str()),
-        "the 8-entry forgery must reproduce the 7-entry root, or this defect is gone \
-         and docs/FORMAT.md §7 needs rewriting"
+        "THE V1 DEFECT IS BACK: an 8-entry forgery reproduced the 7-entry root"
     );
-    assert!(r.clean, "known defect: the forgery passes every core check");
 
-    // The documented mitigation: publish the entry count with the root.
+    // Checked against the genuine published root, the forgery is caught. Nothing
+    // out of band is needed - no published entry count, no side channel. The root
+    // itself now commits to the entry count, which is what v1 could not do.
     let script = repo_root().join("reference").join("verify_journal.py");
     let out = Command::new(python())
         .arg(&script)
@@ -383,17 +396,46 @@ fn duplicated_last_entry_collides_with_the_genuine_root() {
         .arg(&p.journal)
         .arg("--root")
         .arg(&genuine_root)
-        .arg("--expect-entries")
-        .arg("7")
         .arg("--json")
         .output()
-        .expect("run reference verifier with a published count");
+        .expect("run reference verifier against the genuine root");
     let v: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
-    assert_eq!(v["clean"], false, "the published count must catch the forgery");
-    assert_eq!(v["findings"][0]["finding"], "EntryCountMismatch");
-    assert_eq!(v["findings"][0]["expected"], 7);
-    assert_eq!(v["findings"][0]["actual"], 8);
+    assert_eq!(v["clean"], false, "the forgery must not verify against the real root");
+    assert_eq!(v["findings"][0]["finding"], "RootMismatch");
+}
+
+/// A version 1 journal must be identified as such, not reported as 8 tampered
+/// entries. Both implementations detect it by the same rule: every stored hash
+/// matches the v1 leaf rule (bare SHA-256 of `raw`) rather than v2's prefixed one.
+#[test]
+fn agree_on_rejecting_a_version_1_journal() {
+    let dir = tmp();
+    let p = DataPaths::from_dir(dir.path());
+    ingest(&p, 5, "legacy line");
+
+    // Rewrite every entry's hash using the v1 rule, and the state root with it.
+    let content = fs::read_to_string(&p.journal).unwrap();
+    let rewritten: Vec<String> = content
+        .lines()
+        .map(|line| {
+            let mut e: serde_json::Value = serde_json::from_str(line).unwrap();
+            let raw = e["raw"].as_str().unwrap().to_string();
+            e["hash"] = serde_json::Value::String(to_hex(hash_bytes(raw.as_bytes())));
+            serde_json::to_string(&e).unwrap()
+        })
+        .collect();
+    fs::write(&p.journal, rewritten.join("
+") + "
+").unwrap();
+
+    let r = assert_implementations_agree(&p, "version 1 journal");
+    assert!(!r.clean);
+    assert_eq!(r.tampered_entries.len(), 1, "one finding, not one per entry");
+    assert!(matches!(
+        r.tampered_entries[0],
+        Tamper::LegacyV1Journal { entry_count: 5 }
+    ));
 }
 
 // -- inclusion proofs across implementations ---------------------------------

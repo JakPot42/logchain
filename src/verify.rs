@@ -1,4 +1,4 @@
-use crate::hasher::{hash_bytes, to_hex};
+use crate::hasher::{hash_bytes, hash_leaf, to_hex};
 use crate::journal::{leaf_hashes, load_state, read_entries, DataPaths};
 use crate::merkle::compute_root;
 
@@ -20,6 +20,14 @@ pub enum Tamper {
     RootMismatch,
     /// An entry's seq field doesn't match its position in the file.
     SeqMismatch { position: usize, stored_seq: usize },
+    /// Every entry's stored hash matches the FORMAT VERSION 1 leaf rule
+    /// (bare `SHA-256(raw)`) rather than version 2's `SHA-256(0x00 || raw)`.
+    ///
+    /// Reported instead of a wall of `EntryHashMismatch`, which is what a v1
+    /// journal would otherwise produce and which would misdescribe the problem:
+    /// nothing was tampered with, the file is simply an older format whose roots
+    /// are not comparable with version 2 roots.
+    LegacyV1Journal { entry_count: usize },
 }
 
 #[derive(Debug)]
@@ -42,13 +50,47 @@ pub struct VerifyResult {
 /// An attacker who also updates the hash field is caught by level 2
 /// (or by seq checks if they also rewrote seq numbers).
 pub fn check_journal(paths: &DataPaths) -> Result<VerifyResult, crate::journal::JournalError> {
-    let state = load_state(&paths.state)?;
+    check_journal_against(paths, None)
+}
+
+/// As `check_journal`, but compares against `root_override` when one is given.
+///
+/// This is the form that means something. Checking a journal against the
+/// `merkle_root` in its own state file only proves the two files agree, and the
+/// operator who can edit one can edit the other. A root held by someone who
+/// cannot write to this directory is what makes level 2 evidence.
+pub fn check_journal_against(
+    paths: &DataPaths,
+    root_override: Option<&str>,
+) -> Result<VerifyResult, crate::journal::JournalError> {
+    // With an external root supplied, the state file need not exist or be
+    // readable - the whole point is not to depend on it.
+    let merkle_root_stored = match root_override {
+        Some(r) => Some(r.to_ascii_lowercase()),
+        None => load_state(&paths.state)?.merkle_root,
+    };
     let entries = read_entries(&paths.journal)?;
 
     let entry_count = entries.len();
-    let merkle_root_stored = state.merkle_root.clone();
 
     let mut tampered_entries = Vec::new();
+
+    // A version 1 journal read with version 2 rules would report every entry as
+    // mismatched. Detect it first and say what it actually is.
+    if !entries.is_empty()
+        && entries
+            .iter()
+            .all(|e| e.hash == to_hex(hash_bytes(e.raw.as_bytes())))
+    {
+        return Ok(VerifyResult {
+            entry_count,
+            merkle_root_stored,
+            merkle_root_recomputed: None,
+            root_matches: false,
+            tampered_entries: vec![Tamper::LegacyV1Journal { entry_count }],
+            clean: false,
+        });
+    }
 
     // Level 1: per-entry hash check + seq order check.
     for (position, entry) in entries.iter().enumerate() {
@@ -60,7 +102,7 @@ pub fn check_journal(paths: &DataPaths) -> Result<VerifyResult, crate::journal::
             });
         }
 
-        let recomputed = to_hex(hash_bytes(entry.raw.as_bytes()));
+        let recomputed = to_hex(hash_leaf(entry.raw.as_bytes()));
         if recomputed != entry.hash {
             tampered_entries.push(Tamper::EntryHashMismatch {
                 seq: entry.seq,

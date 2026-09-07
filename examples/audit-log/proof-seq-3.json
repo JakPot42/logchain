@@ -1,20 +1,21 @@
 {
-  "proof_version": "1",
+  "proof_version": "2",
+  "format_version": 2,
   "seq": 3,
   "entry_count": 7,
-  "leaf_hash": "18e1aaeb1177171e5522b0d34695ff5f9968ef1ad52cbb8512c15d84ce913987",
-  "merkle_root": "11671fa9483717828eaf704669fa70b8168f405e55628394adaf618d64c6cb15",
+  "leaf_hash": "475b455e0ddd47021e8cc343533a75645982ad36f3d8d1e3087d5e673845f4b1",
+  "merkle_root": "b07c68b5b3d4e3d4a3fbe9da2bcab24399ec19697d1110d4fa6e59fcc75ba436",
   "path": [
     {
-      "hash": "07fcc1de8d1a66609061eedb76295c98893947f1375f904e5d454db632e1d2c0",
+      "hash": "ad9ad81a5a16b73f85be7b6e7375ed0c5618f0a12432143295338d31006b3a9d",
       "side": "left"
     },
     {
-      "hash": "0578f856312955d7ecece618456f38af010bd3a51bba555d2329188368995cb5",
+      "hash": "6c0e48a76a9b47e5d9c4207538d368711ec9952794d4400f5555ce47401a0611",
       "side": "left"
     },
     {
-      "hash": "f797164d007304dfad7136b89e3b3b4c163e5b77763b6d67773e0236080233d8",
+      "hash": "53f34afad33e69e91ee6505debab4f6520a692b30d8b7f44727cb05cbdaf0398",
       "side": "right"
     }
   ]

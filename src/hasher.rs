@@ -11,12 +11,33 @@ pub fn hash_bytes(data: &[u8]) -> Hash {
     h.finalize().into()
 }
 
-/// Hash the concatenation of two hashes (used for Merkle internal nodes).
-/// Crucially: hash_pair(a, b) ≠ hash_pair(b, a) — order matters.
-/// This is what makes a Merkle tree order-sensitive: swapping two log entries
-/// changes every ancestor all the way to the root.
-pub fn hash_pair(left: Hash, right: Hash) -> Hash {
+/// Domain-separation prefixes, per RFC 6962 section 2.1.
+///
+/// Every hash in the tree is tagged by its role before the data it covers, so a
+/// leaf digest and an internal-node digest are computed in disjoint domains and
+/// one can never be presented as the other.
+pub const LEAF_PREFIX: u8 = 0x00;
+pub const NODE_PREFIX: u8 = 0x01;
+
+/// Leaf hash: `SHA-256(0x00 || data)`.
+///
+/// The `0x00` tag is what stops an internal node's 64-byte preimage being passed
+/// off as a log line (and vice versa). Format version 2 onward; version 1 hashed
+/// the data with no prefix. See `docs/FORMAT.md`.
+pub fn hash_leaf(data: &[u8]) -> Hash {
     let mut h = Sha256::new();
+    h.update([LEAF_PREFIX]);
+    h.update(data);
+    h.finalize().into()
+}
+
+/// Internal node: `SHA-256(0x01 || left || right)` over the two 32-byte children.
+///
+/// Order matters — `hash_node(a, b) != hash_node(b, a)` — which is what makes the
+/// tree sensitive to log entries being reordered.
+pub fn hash_node(left: Hash, right: Hash) -> Hash {
+    let mut h = Sha256::new();
+    h.update([NODE_PREFIX]);
     h.update(left);
     h.update(right);
     h.finalize().into()
@@ -60,10 +81,44 @@ mod tests {
     }
 
     #[test]
-    fn hash_pair_is_order_sensitive() {
-        let a = hash_bytes(b"left");
-        let b = hash_bytes(b"right");
-        assert_ne!(hash_pair(a, b), hash_pair(b, a));
+    fn hash_node_is_order_sensitive() {
+        let a = hash_leaf(b"left");
+        let b = hash_leaf(b"right");
+        assert_ne!(hash_node(a, b), hash_node(b, a));
+    }
+
+    /// The whole point of the prefixes: the two domains must never overlap.
+    #[test]
+    fn leaf_and_node_domains_are_disjoint() {
+        let a = hash_leaf(b"a");
+        let b = hash_leaf(b"b");
+
+        // An internal node over (a, b) must not equal a leaf over the same 64
+        // bytes. Without the prefixes these would be identical.
+        let mut concatenated = Vec::new();
+        concatenated.extend_from_slice(&a);
+        concatenated.extend_from_slice(&b);
+        assert_ne!(hash_node(a, b), hash_leaf(&concatenated));
+
+        // And a leaf is not the bare hash of its data, which is what version 1
+        // stored. A v1 journal therefore cannot be mistaken for a v2 one.
+        assert_ne!(hash_leaf(b"a"), hash_bytes(b"a"));
+    }
+
+    /// Fixed vectors, so a third implementation can check its prefixes are on
+    /// the right side of the data and are single bytes.
+    #[test]
+    fn prefixed_hashes_are_known_values() {
+        // SHA-256(0x00) — a leaf over empty data.
+        assert_eq!(
+            to_hex(hash_leaf(b"")),
+            "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+        );
+        // SHA-256(0x01 || 0x00*32 || 0x00*32) — a node over two zero digests.
+        assert_eq!(
+            to_hex(hash_node([0u8; 32], [0u8; 32])),
+            "ae0798d0ecaed2b778eddebf18f071a561c53658c05e76cedecc27cafbdbc577"
+        );
     }
 
     #[test]

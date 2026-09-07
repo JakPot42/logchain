@@ -1,8 +1,8 @@
 # logchain — Secure Log Aggregator with Merkle Integrity
 
-Tamper-evident audit trail for log files. Each log entry is SHA-256 hashed on ingestion and incorporated into a Merkle tree — any retroactive modification to any historical entry is cryptographically detectable, without a blockchain or external service.
+Tamper-evident audit trail for log files. Each log entry is SHA-256 hashed on ingestion and incorporated into an RFC 6962 Merkle tree — any retroactive modification to any historical entry is cryptographically detectable, without a blockchain or external service.
 
-**59 tests · Rust · CLI · No external dependencies at runtime**
+**Format version 2 · 64 tests · Rust · CLI · No external dependencies at runtime**
 
 Independently checkable: a second verifier in Python ([`reference/verify_journal.py`](reference/verify_journal.py),
 standard library only) implements the format from [`docs/FORMAT.md`](docs/FORMAT.md) without
@@ -26,25 +26,60 @@ everything it excludes, is stated in [`docs/LIMITS.md`](docs/LIMITS.md) — read
 
 ## How the Merkle tree works
 
-A Merkle tree is a binary hash tree. Each leaf is `SHA-256(raw_log_line)`. Each internal node is `SHA-256(left_child || right_child)`. The root is a single 32-byte commitment over the entire ordered sequence.
+Format version 2 uses the RFC 6962 construction. Each leaf is
+`SHA-256(0x00 || raw_log_line)`; each internal node is `SHA-256(0x01 || left || right)`.
+The root is a single 32-byte commitment over the entire ordered sequence.
 
 ```
+Four entries (a power of two, so the tree is balanced):
+
                     root
                    /    \
-                 H01    H23
-                /   \  /   \
-               h0   h1 h2   h3
+                 N01    N23
+                /   \   /  \
+               h0   h1 h2  h3
+
+Seven entries: split at k=4, the largest power of two below 7.
+
+                        root
+                     /        \
+              (0..4)            (4..7)
+              /    \            /     \
+            N01    N23        N45     h6
+           /  \    /  \       /  \
+          h0  h1  h2  h3     h4  h5
 ```
 
-Where `h0 = SHA-256(log_line_0)`, `H01 = SHA-256(h0 || h1)`, etc.
+Where `h0 = SHA-256(0x00 || log_line_0)` and `N01 = SHA-256(0x01 || h0 || h1)`.
+Note `h6`: a lone leaf is carried up unchanged, never paired with itself.
 
-**Why this matters:** Change `log_line_2` → `h2` changes → `H23` changes → `root` changes. Every ancestor of the modified leaf changes. The stored root no longer matches the recomputed root, proving the journal was altered.
+**Why this matters:** Change `log_line_2` → `h2` changes → `N23` changes → `root`
+changes. Every ancestor of the modified leaf changes, so the stored root no longer
+matches the recomputed root.
 
-**Odd-count handling (Bitcoin convention):** When a level has an odd number of nodes, the last node is paired with itself before hashing up. Three leaves `[h0, h1, h2]` become pairs `(h0, h1)` and `(h2, h2)`. This means every internal node always has exactly two children, no matter the leaf count.
+**Domain separation (`0x00` / `0x01`).** Tagging leaves and internal nodes differently
+means the two are hashed in disjoint domains, so a 64-byte internal-node preimage can
+never be passed off as a log line, or the reverse.
+
+**Uneven counts: split at the largest power of two.** When the leaf count `n` is not a
+power of two, the list is split into the first `k` leaves and the rest, where `k` is the
+largest power of two below `n` — not paired adjacently with a leftover. Seven leaves
+split 4 and 3; three leaves split 2 and 1, and the lone leaf is carried up unchanged.
+**No node is ever its own sibling**, so the tree's shape is determined entirely by `n`
+and journals of different lengths cannot share a root.
+
+> **Version 1 did this differently and had a root collision.** It paired adjacent nodes
+> and duplicated the last node on an odd level, which let a journal gain a duplicate
+> final entry without changing its root — CVE-2012-2459, found here by writing
+> [`docs/FORMAT.md`](docs/FORMAT.md) rather than by testing. Version 2 is a clean break:
+> v1 roots are void, v1 journals are detected and rejected rather than misread. The
+> story is in [`docs/LIMITS.md`](docs/LIMITS.md); the forgery is kept as a runnable
+> fixture in step 5 below. Note that domain separation alone would *not* have fixed it —
+> only the tree-shape change did.
 
 **Why not just hash everything concatenated?** `SHA-256("ab" || "c") == SHA-256("a" || "bc")` — this boundary ambiguity allows an attacker to split one entry into two or merge two into one without changing the hash. A Merkle tree avoids this by always hashing fixed-length 32-byte children.
 
-**Order sensitivity:** `SHA-256(h0 || h1) != SHA-256(h1 || h0)`. Reordering any two log entries changes every internal node above them, all the way to the root.
+**Order sensitivity:** `NODE(h0, h1) != NODE(h1, h0)`. Reordering any two log entries changes every internal node above them, all the way to the root.
 
 ---
 
@@ -52,9 +87,11 @@ Where `h0 = SHA-256(log_line_0)`, `H01 = SHA-256(h0 || h1)`, etc.
 
 logchain catches tampering at two independent levels:
 
-**Level 1 — per-entry:** On every `verify`, recompute `SHA-256(raw)` for each entry and compare it to the stored `hash` field. If they differ, the raw text was modified. This catches simple log falsification even if the attacker doesn't touch the hash field.
+**Level 1 — per-entry:** On every `verify`, recompute `SHA-256(0x00 || raw)` for each entry and compare it to the stored `hash` field. If they differ, the raw text was modified. This catches simple log falsification even if the attacker doesn't touch the hash field.
 
-**Level 2 — Merkle root:** Recompute the Merkle root from all stored `hash` fields and compare it to the root saved in the state file. If they differ, either the hash fields themselves were modified, or entries were added/removed/reordered. This catches a sophisticated attacker who also updates the per-entry `hash` field — because they'd still need to recompute the root, and if an external snapshot was archived, that root will differ.
+**Level 2 — Merkle root:** Recompute the Merkle root from all stored `hash` fields and compare it against a published root. If they differ, either the hash fields themselves were modified, or entries were added, removed or reordered. This catches a sophisticated attacker who also updates the per-entry `hash` field.
+
+**Level 2 is only worth anything if the root comes from outside the data directory.** Compared against the root in the journal's own `logchain.state`, it proves the two files agree and nothing more — whoever can rewrite one can rewrite the other. Pass `--root <published hex>` to `logchain verify` (or to the reference verifier) with a root held by someone who cannot write here. The CLI warns when you don't.
 
 The combination means: modifying only `raw` is caught by level 1. Modifying `raw` + `hash` is caught by level 2. Either way, the falsification is detected.
 
@@ -67,7 +104,7 @@ logchain [--data-dir PATH] <COMMAND>
 
 Commands:
   tail <file> [--interval-ms N] [--once]   Ingest a log file (live or batch)
-  verify                                    Check integrity against stored root
+  verify [--root HEX]                       Check integrity, ideally against a published root
   export                                    Print committed JSON snapshot to stdout
   prove <seq>                               Print a Merkle inclusion proof for one entry
   status                                    Show entry count and current root
@@ -77,6 +114,12 @@ Commands:
 
 **`verify`** — runs the full two-level check. Exits 0 if clean, 2 if tampered.
 
+**Pass `--root` with a root held somewhere you cannot write.** Without it, `verify`
+compares the journal against the `merkle_root` in its own `logchain.state`, which proves
+only that the two files agree — anyone able to edit one can edit the other. The command
+prints a warning to stderr when run without `--root`, and step 3 of the walkthrough below
+shows a falsified journal that passes the default check and fails the `--root` one.
+
 **What verification does and does not localise.** Detection is guaranteed; attribution is
 deliberately limited, and the tool does not guess beyond what the data supports.
 
@@ -85,10 +128,12 @@ deliberately limited, and the tool does not guess beyond what the data supports.
 | `EntryHashMismatch` | the exact `seq` whose `raw` and `hash` disagree | **which of the two was edited.** `SHA-256(raw) != hash` is symmetric — editing the text and editing the stored hash produce an identical signature, and nothing in the journal distinguishes them |
 | `RootMismatch` | that the journal as a whole no longer matches the stored root | **any single entry.** Every entry is self-consistent, so the cause is a state-file edit or whole entries added, dropped or reordered. It carries no `seq` because attributing it to one would be fabricated |
 | `SeqMismatch` | the exact position whose `seq` is out of order | — |
+| `LegacyV1Journal` | that this is a format version 1 journal, not a tampered version 2 one | anything about its integrity — v1 roots are not comparable with v2 roots, so it is rejected rather than checked |
 
 Localising a `RootMismatch` any further would need an independent record of the expected
 entry set. A journal plus its own state file cannot provide that — which is the argument for
-archiving `export` output somewhere the attacker does not control.
+archiving the root somewhere the attacker does not control, and for passing it back with
+`--root`.
 
 **`export`** — prints a JSON snapshot containing the Merkle root and the full ordered list of per-entry hashes. Archive this externally so a local root-modification attack is also detectable.
 
@@ -109,18 +154,26 @@ Two files in the data directory (default `./logchain-data/`):
 ```
 
 - `seq`: zero-based index; out-of-order seqs are a tamper signal
-- `ingested_at`: when logchain ingested the line (not the log's own timestamp)
-- `hash`: `SHA-256(raw)`, hex-encoded
+- `ingested_at`: when logchain ingested the line (not the log's own timestamp). **Not covered by any hash** — do not treat it as a trusted timestamp
+- `hash`: the leaf hash `SHA-256(0x00 || raw)`, hex-encoded lowercase
 - `raw`: the original log line, verbatim
 
 **`logchain.state`** — JSON object with the current Merkle root:
 ```json
 {
-  "merkle_root": "563ed4c9b240...",
-  "entry_count": 20,
-  "last_updated": "2026-06-30T08:04:17Z"
+  "format_version": 2,
+  "merkle_root": "b07c68b5b3d4...",
+  "entry_count": 7,
+  "last_updated": "2026-09-07T06:43:58Z"
 }
 ```
+
+`format_version` is checked before anything else. A version 1 file (no such field) is
+rejected with an explanation rather than misreported as tampered — v1 and v2 roots over
+the same lines are different values and neither verifies against the other.
+
+The full byte-level specification, precise enough to write a third verifier from, is
+[`docs/FORMAT.md`](docs/FORMAT.md).
 
 ---
 
@@ -141,39 +194,38 @@ Everything above is a claim about a format. `examples/audit-log/` is that claim 
 can run, using a verifier that shares no code with the tool that wrote them.
 
 `reference/verify_journal.py` is a second, independent implementation of the format in
-`docs/FORMAT.md`: single file, Python 3 standard library only, no dependencies, and it
-imports nothing from this crate and shells out to nothing. If you do not trust the Rust
-binary — and you should not have to — this is the one to run. `docs/FORMAT.md` is precise
-enough to write a third.
+[`docs/FORMAT.md`](docs/FORMAT.md): single file, Python 3 standard library only, no
+dependencies, and it imports nothing from this crate and shells out to nothing. If you do
+not trust the Rust binary — and you should not have to — this is the one to run.
+`docs/FORMAT.md` is precise enough to write a third.
 
 ```
 examples/audit-log/
   access.log               the 7 source log lines
   logchain.journal         the journal built from them
   logchain.state           the writer's own record of the root
-  published-root.txt       the root and entry count, as they would be archived off-box
+  published-root.txt       the root, as it would be archived off-box
   proof-seq-3.json         an inclusion proof for entry 3
   tampered-entry/          one log line edited, its hash left alone
   tampered-root/           one line edited, its hash AND the state root rewritten to match
-  forged-duplicate/        a known format defect, demonstrated (see step 5)
+  forged-duplicate/        the version 1 forgery, kept as a fixture (see step 5)
 ```
 
-Set up (any shell; no build required for the verifier):
+Set up (any shell; the reference verifier needs no build):
 
 ```bash
 cd examples/audit-log
 ROOT=$(grep merkle_root published-root.txt | cut -d= -f2)
-N=$(grep entry_count published-root.txt | cut -d= -f2)
 V="python ../../reference/verify_journal.py"
 ```
 
 ### 1. The clean journal passes
 
 ```console
-$ $V --journal logchain.journal --root $ROOT --expect-entries $N
+$ $V --journal logchain.journal --root $ROOT
 entries checked:  7
-stored root:      11671fa9483717828eaf704669fa70b8168f405e55628394adaf618d64c6cb15
-recomputed root:  11671fa9483717828eaf704669fa70b8168f405e55628394adaf618d64c6cb15
+stored root:      b07c68b5b3d4e3d4a3fbe9da2bcab24399ec19697d1110d4fa6e59fcc75ba436
+recomputed root:  b07c68b5b3d4e3d4a3fbe9da2bcab24399ec19697d1110d4fa6e59fcc75ba436
 INTEGRITY OK
 $ echo $?
 0
@@ -182,6 +234,16 @@ $ echo $?
 The verifier recomputed all seven leaf hashes from the `raw` text and rebuilt the tree, and
 landed on the same root that was published. Nothing was taken on trust from the state file.
 
+The Rust CLI does the same thing against the same external root:
+
+```console
+$ cargo run -q -- --data-dir . verify --root $ROOT
+  Entries checked:  7
+  Stored root:      b07c68b5b3d4e3d4a3fbe9da2bcab24399ec19697d1110d4fa6e59fcc75ba436
+  Recomputed root:  b07c68b5b3d4e3d4a3fbe9da2bcab24399ec19697d1110d4fa6e59fcc75ba436
+  ✓ INTEGRITY OK — no tampering detected
+```
+
 **The root is reproducible from `access.log` alone.** Ingest it into a fresh directory and
 you get the same root, even though every `ingested_at` timestamp will differ, because
 `ingested_at` is not part of any hash:
@@ -189,7 +251,7 @@ you get the same root, even though every `ingested_at` timestamp will differ, be
 ```console
 $ cargo run -q -- --data-dir /tmp/fresh tail access.log --once
 $ grep merkle_root /tmp/fresh/logchain.state
-  "merkle_root": "11671fa9483717828eaf704669fa70b8168f405e55628394adaf618d64c6cb15",
+  "merkle_root": "b07c68b5b3d4e3d4a3fbe9da2bcab24399ec19697d1110d4fa6e59fcc75ba436",
 ```
 
 ### 2. The tampered copy fails, and names the entry
@@ -198,11 +260,11 @@ $ grep merkle_root /tmp/fresh/logchain.state
 `12,480 rows` became `12 rows` — with the stored hash left untouched. Level 1 catches it:
 
 ```console
-$ $V --journal tampered-entry/logchain.journal --root $ROOT --expect-entries $N
+$ $V --journal tampered-entry/logchain.journal --root $ROOT
 entries checked:  7
-stored root:      11671fa9483717828eaf704669fa70b8168f405e55628394adaf618d64c6cb15
-recomputed root:  11671fa9483717828eaf704669fa70b8168f405e55628394adaf618d64c6cb15
-  EntryHashMismatch seq=3 stored=18e1aaeb1177171e5522b0d34695ff5f9968ef1ad52cbb8512c15d84ce913987 recomputed=9d078ec76f026197a89d1de3dd501ce069133581d0b2f79de1f82f7164806901
+stored root:      b07c68b5b3d4e3d4a3fbe9da2bcab24399ec19697d1110d4fa6e59fcc75ba436
+recomputed root:  b07c68b5b3d4e3d4a3fbe9da2bcab24399ec19697d1110d4fa6e59fcc75ba436
+  EntryHashMismatch seq=3 stored=475b455e0ddd47021e8cc343533a75645982ad36f3d8d1e3087d5e673845f4b1 recomputed=bf584b7249eae951c604e6a671c3514821a6016154e232c62dce3f0922fab847
 INTEGRITY VIOLATION
 $ echo $?
 2
@@ -215,33 +277,45 @@ the side that moved — that check is symmetric and nothing in the journal disti
 ### 3. Why the published root has to be held by someone else
 
 `tampered-root/` is the same edit made competently: the line, its `hash`, **and** the root in
-`logchain.state` were all rewritten to agree. Checked against its own state file, it is clean:
+`logchain.state` were all rewritten to agree. Checked against its own state file — the
+default, and what the CLI does with no `--root` — it is clean:
 
 ```console
-$ $V --journal tampered-root/logchain.journal --state tampered-root/logchain.state
-entries checked:  7
-stored root:      d3671c4e99e930f19eea8958a35d19c8b71162f981a59b56a5d803b593f41bff
-recomputed root:  d3671c4e99e930f19eea8958a35d19c8b71162f981a59b56a5d803b593f41bff
-INTEGRITY OK
+$ cargo run -q -- --data-dir tampered-root verify
+  Entries checked:  7
+  Stored root:      f762c11319b352da891641965f3fa5568566921d2c28fb6bc12fa47e0d7f58b9
+  Recomputed root:  f762c11319b352da891641965f3fa5568566921d2c28fb6bc12fa47e0d7f58b9
+  ✓ INTEGRITY OK — no tampering detected
+
+note: checked against this journal's own state file, which whoever can
+      write the journal can also rewrite. For evidence against them,
+      re-run with --root <the externally published root>.
 ```
 
-`cargo run -- --data-dir examples/audit-log/tampered-root verify` says the same thing, because
-the CLI has only the state file to compare against. The falsification surfaces only when the
-root comes from outside:
+Supply the root from outside and the falsification surfaces immediately:
 
 ```console
-$ $V --journal tampered-root/logchain.journal --root $ROOT --expect-entries $N
-entries checked:  7
-stored root:      11671fa9483717828eaf704669fa70b8168f405e55628394adaf618d64c6cb15
-recomputed root:  d3671c4e99e930f19eea8958a35d19c8b71162f981a59b56a5d803b593f41bff
-  RootMismatch
-INTEGRITY VIOLATION
+$ cargo run -q -- --data-dir tampered-root verify --root $ROOT
+  Entries checked:  7
+  Stored root:      b07c68b5b3d4e3d4a3fbe9da2bcab24399ec19697d1110d4fa6e59fcc75ba436
+  Recomputed root:  f762c11319b352da891641965f3fa5568566921d2c28fb6bc12fa47e0d7f58b9
+  ✗ Merkle root MISMATCH — tree has been altered
+    TAMPERED stored Merkle root does not match the journal
+  ✗ INTEGRITY VIOLATION — journal has been tampered with
 $ echo $?
 2
 ```
 
-That contrast is the whole argument of `docs/LIMITS.md`. A self-held root catches accidents.
-It does not catch the operator.
+The reference verifier agrees, from a separate implementation:
+
+```console
+$ $V --journal tampered-root/logchain.journal --root $ROOT
+  RootMismatch
+INTEGRITY VIOLATION
+```
+
+That contrast is the whole argument of [`docs/LIMITS.md`](docs/LIMITS.md). A self-held root
+catches accidents. It does not catch the operator.
 
 ### 4. Checking the inclusion proof
 
@@ -259,64 +333,72 @@ Passing `--journal` also confirms the entry with that `seq` really carries the l
 proof claims. Point the same proof at the forged root from step 3 and it is rejected:
 
 ```console
-$ $V --proof proof-seq-3.json --root d3671c4e99e930f19eea8958a35d19c8b71162f981a59b56a5d803b593f41bff
+$ $V --proof proof-seq-3.json --root f762c11319b352da891641965f3fa5568566921d2c28fb6bc12fa47e0d7f58b9
 INCLUSION PROOF INVALID seq=3
 ```
 
-### 5. A defect this example also demonstrates
+### 5. The version 1 forgery, kept as a fixture
 
-`forged-duplicate/` has **eight** entries — the seventh, duplicated and renumbered — and
-produces a root byte-identical to the seven-entry journal it was forged from. Both verifiers
-in this repository call it clean:
+`forged-duplicate/` has **eight** entries — the seventh, duplicated and renumbered so its
+`seq` still matches its position. **Under format version 1 this verified completely clean
+against the seven-entry root**, because the odd-node rule paired the last leaf with itself
+and the two trees computed byte-identical roots. No check fired. That is CVE-2012-2459.
+
+Under version 2 it fails:
 
 ```console
 $ $V --journal forged-duplicate/logchain.journal --root $ROOT
 entries checked:  8
-stored root:      11671fa9483717828eaf704669fa70b8168f405e55628394adaf618d64c6cb15
-recomputed root:  11671fa9483717828eaf704669fa70b8168f405e55628394adaf618d64c6cb15
-INTEGRITY OK
-```
-
-This is the odd-node convention working exactly as specified and being exploitable anyway —
-the flaw known from Bitcoin as CVE-2012-2459. The entry count is what the root cannot carry,
-which is why `published-root.txt` publishes both:
-
-```console
-$ $V --journal forged-duplicate/logchain.journal --root $ROOT --expect-entries $N
-entries checked:  8
-stored root:      11671fa9483717828eaf704669fa70b8168f405e55628394adaf618d64c6cb15
-recomputed root:  11671fa9483717828eaf704669fa70b8168f405e55628394adaf618d64c6cb15
-  EntryCountMismatch expected=7 actual=8
+stored root:      b07c68b5b3d4e3d4a3fbe9da2bcab24399ec19697d1110d4fa6e59fcc75ba436
+recomputed root:  e6a423a5133478ca8b799846a2e299670bc0c9203332737113f56bb73682bc1d
+  RootMismatch
 INTEGRITY VIOLATION
 $ echo $?
 2
 ```
 
-Documented in `docs/FORMAT.md` §7, and pinned by a test so it cannot quietly change.
+Nothing out of band was needed to catch it — no published entry count, no side channel. The
+root itself now commits to how many entries there are, which is exactly what version 1 could
+not do. The fixture stays in the repository as a regression test
+(`duplicated_last_entry_no_longer_collides_with_the_genuine_root`) so the defect cannot
+return unnoticed. Full account in [`docs/LIMITS.md`](docs/LIMITS.md).
 
 ---
 
 ## Two implementations, checked against each other
 
 `tests/cross_language.rs` runs the Rust verifier and the Python reference verifier over the
-same on-disk fixtures — clean journals, every odd leaf count from 3 to 9, and each tampered
-case the existing Rust tests build — and fails unless they agree on **all** of: the
-recomputed root, the entry count, the root-match verdict, the clean verdict, and the ordered
-list of findings with their field values.
+same on-disk fixtures — clean journals, every odd leaf count from 3 to 9, each tampered
+case the existing Rust tests build, a deletion, a version 1 journal, and the duplication
+forgery — and fails unless they agree on **all** of: the recomputed root, the entry count,
+the root-match verdict, the clean verdict, and the ordered list of findings with their
+field values.
 
 Agreement on the clean cases alone would prove little. The value is that they agree on the
 corrupted ones: the same `EntryHashMismatch` on the same `seq` with the same two hex digests,
 the same lone `RootMismatch` where the format says a finding must not be attributed to any
 entry.
 
-The harness was checked for teeth by breaking the Python verifier three ways and confirming
+The harness was checked for teeth by breaking the Python verifier five ways and confirming
 the tests fail:
 
 | deliberate mutation | tests failed |
 |---|---|
-| odd node promoted instead of paired with itself | 4 of 11 — every fixture that has an odd level somewhere; the even-only ones still passed, which is correct |
-| `RootMismatch` reported without the suppression rule | 1 of 11 — the one fixture where a root difference and an entry finding coexist |
-| pair-hash operand order swapped | 9 of 11 — everything except the empty and single-entry journals, which never pair |
+| split at `n/2` instead of the largest power of two below `n` | 4 of 12 — every fixture whose leaf count is not a power of two |
+| `RootMismatch` reported without the suppression rule | 1 of 12 — the one fixture where a root difference and an entry finding coexist |
+| node operands swapped (`right ‖ left`) | 9 of 12 — everything except the empty and single-entry journals, which never build a node |
+| node prefix changed from `0x01` to `0x00` (domain separation removed) | 9 of 12 |
+| leaf prefix dropped entirely (silently reverting to the v1 leaf rule) | 9 of 12 |
+
+The last two matter because they are the version 2 change itself: if either prefix were
+wrong, or dropped, the harness says so.
+
+**One thing the harness cannot do, stated plainly.** Both implementations agreed on the
+version 1 root collision — they computed the same wrong answer, so cross-checking them
+against each other would never have found it. It was found by writing
+[`docs/FORMAT.md`](docs/FORMAT.md) and having to state exactly which bytes are hashed at
+every level. Two implementations agreeing is evidence they implement the same specification.
+It is not evidence the specification is right.
 
 ---
 
@@ -344,8 +426,8 @@ Expected output at step 7:
   ✗ 1 tampered entry
 
     TAMPERED seq=7: raw content and stored hash disagree
-        stored hash:     4fbbcd1905122571b40d8cfb320b9c92d41903a0c6357b13e60be8cfebe97431
-        recomputed hash: 2bc19fdba5336b22b5f829b89967c704e7c9c5a5369cfb9566e034047f30761f
+        stored hash:     64b00251d36c041b81c1717e519d96049dc7055e16fc3c77d14ba85a07a9ba73
+        recomputed hash: b82cefa3eaa7b8d58fac9fbd705bd44e883fe5a2ef41f1648d5f05f5fd31dec8
         (cannot tell which side was edited - the check is symmetric)
 
   ✗ INTEGRITY VIOLATION — journal has been tampered with
@@ -359,25 +441,31 @@ Expected output at step 7:
 cargo test
 ```
 
-**59 tests total:**
-- `src/hasher.rs` — 5 unit tests (known SHA-256 values, determinism, order sensitivity, hex round-trip)
-- `src/merkle.rs` — 19 unit tests (root construction for 0–5 leaves, duplication rule, all-leaf tamper coverage, proof generation and verification, manual computation verification)
+**64 tests total:**
+- `src/hasher.rs` — 7 unit tests (known SHA-256 values, the `0x00`/`0x01` prefix vectors, **leaf and node domains proven disjoint**, determinism, order sensitivity, hex round-trip)
+- `src/merkle.rs` — 21 unit tests (the split-point rule, root construction for 0–7 leaves, every proof of every shape from 1 to 33 leaves, logarithmic proof length, all-leaf tamper coverage, cross-tree proof rejection, and the two tests that pin format version 2's reason for existing — see below)
 - `src/journal.rs` — 7 unit tests (append, sequential seqs, hash correctness, state update, state persistence, empty journal, incremental ingest)
 - `src/verify.rs` — 7 unit tests (clean, empty, entry-hash mismatch detection, hash-field tamper detection, single entry, count + root match)
 - `tests/integration.rs` — 10 end-to-end tests (ingest→verify clean, incremental ingest, raw-tamper caught, hash-tamper caught, **state-root tamper caught and not blamed on an entry**, export count/root, export hash correctness, root changes after tamper, empty clean, single-entry round-trip)
-
-- `tests/cross_language.rs` — 11 cross-implementation tests. Each builds a fixture on disk,
+- `tests/cross_language.rs` — 12 cross-implementation tests. Each builds a fixture on disk,
   runs **both** the Rust verifier and `reference/verify_journal.py`, and fails unless they
   agree on the recomputed root, entry count, root-match verdict, clean verdict and the ordered
-  findings. Covers clean journals, every odd leaf count from 3 to 9, all four tamper cases the
-  other tests use, a deletion, Rust-generated inclusion proofs checked by the Python verifier,
-  and **a pinned known defect** (`duplicated_last_entry_collides_with_the_genuine_root`).
+  findings. Covers clean journals, every odd leaf count from 3 to 9, all the tamper cases the
+  other tests use, a deletion, a version 1 journal, Rust-generated inclusion proofs checked by
+  the Python verifier, and the duplication forgery that version 1 could not catch.
 
-Thirteen of these are the ones that matter: they write a real journal or proof, corrupt it on
-disk, and assert the specific failure (2 in `verify.rs`, 4 in `integration.rs`, 7 in
-`cross_language.rs`). A tamper-evidence claim that is only tested on the happy path is
-not evidence of anything — and one that is only checked by the binary that wrote the file is
-not independent of it.
+**The two tests that carry format version 2:**
+`merkle::appending_a_duplicate_of_the_last_entry_changes_the_root` checks every leaf count
+from 1 to 64, and `merkle::domain_separation_alone_would_not_have_fixed_the_v1_collision`
+reconstructs version 1's tree shape *with* version 2's prefixes and shows the collision
+surviving untouched — the demonstration that the `0x00`/`0x01` tags alone were not the fix,
+and that the tree-shape change was required.
+
+Sixteen of these are the ones that matter: they write a real journal or proof, corrupt it on
+disk, and assert the specific failure (2 in `verify.rs`, 4 in `integration.rs`, 8 in
+`cross_language.rs`, plus the two collision tests above). A tamper-evidence claim that is
+only tested on the happy path is not evidence of anything — and one that is only checked by
+the binary that wrote the file is not independent of it.
 
 These tests need a Python 3 interpreter on `PATH`. They fail loudly rather than skipping if
 one is missing, because a silently skipped cross-implementation test would leave the central
@@ -426,12 +514,12 @@ This project connects two threads running through the broader portfolio:
 ```
 src/
   lib.rs       — module declarations
-  hasher.rs    — SHA-256 primitives (Hash type alias, hash_bytes, hash_pair, to_hex/from_hex)
-  merkle.rs    — pure Rust Merkle tree (compute_root, generate_proof, verify_proof)
   journal.rs   — on-disk storage (JournalEntry, LogchainState, append_entry, ingest_file)
   verify.rs    — integrity checking (check_journal, two-level tamper detection)
+  hasher.rs    — SHA-256 primitives (hash_leaf/hash_node with the RFC 6962 prefixes)
+  merkle.rs    — RFC 6962 Merkle tree (compute_root, generate_proof, verify_proof)
   report.rs    — terminal output, JSON export snapshot, inclusion proof files
-  main.rs      — clap v4 CLI (tail, verify, export, prove, status)
+  main.rs      — clap v4 CLI (tail, verify [--root], export, prove, status)
 reference/
   verify_journal.py — SECOND implementation: independent verifier, Python stdlib only
 docs/
@@ -439,7 +527,7 @@ docs/
   LIMITS.md    — what this proves and what it does not
 examples/
   audit-log/   — runnable worked example: clean journal, published root, inclusion
-                 proof, and three tampered copies
+                 proof, two tampered copies, and the version 1 forgery fixture
 tests/
   integration.rs    — end-to-end pipeline tests
   cross_language.rs — Rust verifier vs Python verifier, same fixtures, must agree
@@ -454,4 +542,4 @@ is the only thing that makes the agreement between them meaningful.
 
 **Crate pattern:** `[lib]` + `[[bin]]` — the library is importable in integration tests without going through the binary. Same pattern as pcap-anomaly and bin-intel.
 
-**No unsafe code. No hand-rolled cryptography.** SHA-256 comes from the `sha2` crate (RustCrypto project). The Merkle tree structure is hand-implemented — it's simple enough to fit in one file and important enough to understand every line.
+**No unsafe code. No hand-rolled cryptography.** SHA-256 comes from the `sha2` crate (RustCrypto project). The Merkle tree structure is hand-implemented — it's simple enough to fit in one file and important enough to understand every line. The construction follows RFC 6962 rather than being invented here, which is what version 1 got wrong.

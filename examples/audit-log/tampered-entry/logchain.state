@@ -1,5 +1,6 @@
 {
-  "merkle_root": "11671fa9483717828eaf704669fa70b8168f405e55628394adaf618d64c6cb15",
+  "format_version": 2,
+  "merkle_root": "b07c68b5b3d4e3d4a3fbe9da2bcab24399ec19697d1110d4fa6e59fcc75ba436",
   "entry_count": 7,
-  "last_updated": "2026-09-07T05:49:33.495881400+00:00"
+  "last_updated": "2026-09-07T06:43:58.913421900+00:00"
 }
