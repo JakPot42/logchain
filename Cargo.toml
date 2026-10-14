@@ -2,7 +2,7 @@
 name = "logchain"
 version = "0.2.0"
 edition = "2024"
-description = "Secure Log Aggregator with Merkle Integrity — tamper-evident audit trails via RFC 6962 SHA-256 Merkle trees"
+description = "A tamper-evident journal for log files. Each line is hashed with SHA-256 and placed in an RFC 6962 Merkle tree."
 
 [lib]
 name = "logchain"

@@ -14,7 +14,7 @@ use logchain::report::{
 use logchain::verify::check_journal_against;
 
 #[derive(Parser)]
-#[command(name = "logchain", about = "Tamper-evident log aggregator with Merkle integrity")]
+#[command(name = "logchain", about = "A tamper-evident journal for log files, hashed into an RFC 6962 Merkle tree")]
 struct Cli {
     /// Directory where the journal and state files are stored.
     #[arg(long, default_value = "./logchain-data")]
